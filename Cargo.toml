@@ -1,6 +1,6 @@
 [package]
 name = "rtdo"
-version = "0.1.0"
+version = "0.5.0"
 edition = "2021"
 description = "Root Task Do — 交互式、环境自适应的提权工具（替代传统 sudo）"
 license = "MIT"

@@ -2,6 +2,12 @@
 
 一个可交互的、环境自适应的提权工具，用来替代传统 sudo。
 
+- **认证**：以 **root 密码**（PAM）认证，不是你自己账户的密码；
+- **策略**：信任目录自动放行、高危黑名单硬拦截、其余交互确认（终端 y/N 或图形弹窗）；
+- **审计**：所有提权请求（放行/拒绝/拦截）写入审计日志；
+- **双语**：所有输出中英双语，按 `RTDO_LANG` / `LANG` 自动选择；
+- **可选禁用 sudo**：Go 守护进程 + systemd 服务拦截 `sudo`，`sudo-force` 调用原版 sudo。
+
 ## 这是什么
 
 rtdo 是一个「带策略的 sudo」。你用它在终端里执行命令时，它会先校验 root 密码，然后根据配置文件决定怎么处理这条命令：
@@ -14,132 +20,130 @@ rtdo 是一个「带策略的 sudo」。你用它在终端里执行命令时，�
 
 它和 sudo 的区别：sudo 验证一次密码之后就放行一切；rtdo 会对每条命令单独做判断，危险操作多一道确认，日常操作尽量不打扰。适合经常要在服务器（比如 NixOS）上以 root 跑命令、又不想让 `sudo !!` 变成习惯性动作的人。
 
-## 设计目标
+## 特性（v0.5.0）
 
-- 默认拦截：除非用户明确允许，任何提权操作都不会执行。
-- 环境自适应：在图形桌面下弹窗提醒，在终端中输出文本提示。
-- 策略驱动：通过配置文件定义「信任目录」与「高危操作」，仅对真正危险的操作进行拦截。
-- 单文件部署：一个二进制文件 + 一个配置文件，复制到对应目录即可使用。
-- 安装需 root：rtdo 本身需要由 root 用户安装到系统目录。
+- 首次/每次运行自动检查 root 密码：
+  - **未设置**（WSL 默认、发行版默认锁定 root）→ 强制引导设置（等价于自动执行 `sudo passwd`）：验证当前用户密码 → 输入两次新 root 密码 → 写入；
+  - **过弱**（等于系统内任意一个用户名，或等于任意一个用户的密码）→ 同样强制重新设置；
+  - 新 root 密码约束：不能等于任意用户名、不能与当前用户密码相同、长度 ≥ 6、不含 `:`/换行；
+- **可选禁用 sudo（守护进程拦截，替代旧版别名方案）**：
+  - 每次运行询问是否禁用 sudo；已启用则不再询问；
+  - 启用后 `sudo` 被 Go 守护进程（`rtdo-sudod`，systemd 服务 `rtdo-sudod.service` 管理）拦截并提示改用 rtdo；
+  - 确需原版 sudo 时用 `sudo-force <命令>`（原版 sudo 移动为 `/usr/bin/sudo.real`）；
+  - 原版 `alias sudo=rtdo` 方案已废弃（别名挡不住真实存在的 sudo 二进制），启用拦截时会自动清理旧别名文件；
+- **sudo 前置检查**：未安装 sudo 或当前用户不在 sudo/wheel 组 → 明确提示先安装并正确配置 sudo 再操作；
+- **一键分发**：`rtdo.sh --install / --uninstall`（curl 拉源码编译，或 git clone 本地编译），详见「安装」；
+- PAM 认证（root 密码）、策略判定（信任目录/黑名单）、审计日志（JSON/text）、中英双语输出。
 
-## 工作流程
+## 架构
 
-一次提权请求的完整流程：
+```
+用户输入 rtdo <命令> / sudo <命令> / sudo-force <命令>
+        │
+        ├── rtdo（Rust，setuid root）
+        │      ├── 配置加载 /etc/rtdo/rtdo.conf
+        │      ├── PAM 认证（root 密码）
+        │      ├── 策略判定 + 交互确认 + 审计
+        │      └── 以 root 执行（环境清理）
+        │
+        ├── sudo（shim，Go）──> rtdo-sudod（Go 守护进程，unix socket /run/rtdo/sudo.sock）
+        │        │                ├── 默认拦截：提示使用 rtdo
+        │        │                └── 记录日志（journald）
+        │        └── sudo-force ──> /usr/bin/sudo.real（原版 sudo）
+        │
+        └── systemd: rtdo-sudod.service（开机自启，守护进程管理）
+```
 
-1. **权限检查**：进程必须拥有 root 权限（二进制以 setuid root 安装，或直接由 root/sudo 调用）。
-2. **加载策略**：读取 `/etc/rtdo/rtdo.conf`。
-3. **认证**：普通用户调用时，要求输入 **root 密码**（PAM 校验，不是你自己账户的密码），错误最多重试 3 次；root 直接调用则跳过。若 root 密码尚未设置，首次运行会自动引导设置（见「首次使用：设置 root 密码」）。
-4. **策略判定**：
-   - 命中黑名单 → 直接拦截，弹窗或终端告知原因；
-   - 命令涉及的全部路径都在信任目录内 → 自动放行；
-   - 其他情况 → 交互确认（终端 y/N 或图形弹窗「同意/拒绝」）。
-5. **执行**：确认后以 root 身份运行命令。命令不经 shell，直接 exec；环境做了清理（安全 PATH、HOME=/root、移除 LD_PRELOAD 等）。
-
-非交互环境（没有终端也没有图形桌面，比如被 cron 调用）默认拒绝。
+- `rtdo`：Rust 实现的主程序（`src/`），策略、认证、交互、审计；
+- `rtdo-sudod`：Go 实现（`daemon/`），守护进程 + sudo/sudo-force shim，监听 `/run/rtdo/sudo.sock`；
+- `rtdo.sh`：安装/卸载管理脚本。
 
 ## 安装
 
-需要 Linux + Rust 工具链 + libpam 开发头文件：
+### 前置条件
+
+- Linux + systemd；
+- Rust 工具链（`cargo`）与 Go 工具链（`go`，编译守护进程用）；
+- libpam 开发头文件（`libpam0g-dev` / `pam-devel` / `pam`，脚本会自动安装）；
+- **sudo 已安装并正确配置**（当前用户在 sudo/wheel 组）。未安装时 `rtdo.sh` 会提示先安装配置。
+
+### 方式一：curl 一键安装（推荐）
 
 ```bash
-# Debian/Ubuntu
-sudo apt install libpam0g-dev
-# Fedora
-sudo dnf install pam-devel
-# Arch
-sudo pacman -S pam
-
-cargo build --release
+curl -fsSL https://raw.githubusercontent.com/Reimilia617/RTDO-Project/main/rtdo.sh | sudo sh -s -- --install
 ```
 
-安装到系统目录并设置 setuid：
+脚本会从 GitHub 仓库拉取源码 → 编译 rtdo（Rust）与 rtdo-sudod（Go）→ 安装到系统 → 注册并启动 systemd 服务 → 拦截 sudo。
+
+### 方式二：git clone 安装
 
 ```bash
-sudo cp target/release/rtdo /usr/local/bin/rtdo
-sudo chown root:root /usr/local/bin/rtdo
-sudo chmod u+s /usr/local/bin/rtdo
-
-sudo mkdir -p /etc/rtdo
-sudo rtdo --init
+git clone https://github.com/Reimilia617/RTDO-Project.git
+cd RTDO-Project
+sudo ./rtdo.sh --install
 ```
 
-`--init` 会生成默认配置 `/etc/rtdo/rtdo.conf`，同时生成 PAM 认证服务文件 `/etc/pam.d/rtdo`（rtdo 靠它校验 root 密码；如果该文件缺失，首次运行时也会自动补建）。
+### 安装内容
 
-### 安装前置：需要 sudo
+| 文件 | 说明 |
+|---|---|
+| `/usr/local/bin/rtdo` | 主程序（setuid root） |
+| `/usr/local/lib/rtdo/rtdo-sudod` | Go 守护进程（也作为 sudo/sudo-force shim） |
+| `/etc/rtdo/rtdo.conf` | 默认配置（`rtdo --init` 生成） |
+| `/etc/pam.d/rtdo` | PAM 认证服务文件 |
+| `/etc/systemd/system/rtdo-sudod.service` | systemd 服务（开机自启） |
+| `/usr/bin/sudo` → shim | 原版 sudo 移动为 `/usr/bin/sudo.real` |
+| `/usr/bin/sudo-force` | 调用原版 sudo 的入口 |
+| `/etc/rtdo/sudo-disabled` | 拦截启用标记 |
 
-rtdo 的安装与日常运维（如手动 `sudo passwd`）依赖 sudo，因此**安装 rtdo 前请先确认 sudo 已安装并正确配置**（当前用户已在 sudo/wheel 组）：
+## 卸载
 
 ```bash
-# Debian/Ubuntu
-sudo apt install sudo && sudo usermod -aG sudo <你的用户名>
-# Fedora/RHEL
-sudo dnf install sudo && sudo usermod -aG wheel <你的用户名>
-# Arch
-sudo pacman -S sudo && sudo usermod -aG wheel <你的用户名>
-# 加入组后需重新登录生效
+sudo ./rtdo.sh --uninstall
 ```
 
-rtdo 会在 `--init` 和首次运行引导时自动检测：**如果检测到 sudo 缺失或当前用户不在 sudo/wheel 组，会明确提示你先安装并正确配置 sudo，再继续安装 rtdo**。
+会：停止并删除 systemd 服务 → 删除 `/usr/bin/sudo` shim 与 `sudo-force`，把 `/usr/bin/sudo.real` 还原为 `/usr/bin/sudo` → 删除配置、二进制与 PAM 文件。**sudo 完整还原为可用模式。**
 
-为什么要 setuid：rtdo 需要以 root 身份去校验密码、执行命令，setuid 是让普通用户进入这个流程的标准做法（sudo 自己也是这么装的）。如果只打算给 root 自己用，不设 setuid 直接以 root 调用也行，只是会跳过密码输入。
+> 注意：卸载时若 sudo 已被拦截，脚本内部操作不依赖 sudo（以 root 直接执行）。
 
-## 首次使用：设置 root 密码（必读）
+## 首次使用
 
-rtdo 认证的是 **root 密码**，不是你自己账户的密码。**如果 root 账户没有密码，rtdo 无法工作**——比如 WSL 里 root 默认没有密码、部分发行版默认锁定 root（`/etc/shadow` 中 root 行以 `!` 或 `*` 开头）。
+rtdo 认证的是 **root 密码**（不是你自己账户的密码）。
 
-手动设置 root 密码（二选一）：
-
-```bash
-# 普通用户执行（sudo 会先验证你的用户密码，再让你设置新的 root 密码）
-sudo passwd
-
-# 或先切到 root 用户，再执行 passwd（无参数即修改 root 自己的密码）
-su -c passwd
-```
-
-**首次运行自动引导**：当检测到 root 密码未设置时，非 root 用户第一次运行 `rtdo <命令>` 会自动进入**强制设置流程**（等价于自动执行 `sudo passwd`），无法跳过：
+**root 密码未设置或过弱**时（WSL 默认无密码、发行版默认锁定 root、密码等于用户名或其他用户密码），非 root 用户运行 `rtdo <命令>` 会自动进入**强制设置流程**（等价于自动执行 `sudo passwd`），无法跳过：
 
 1. 验证你当前用户的密码（确认操作者身份，最多 3 次机会）；
 2. 输入两次新的 root 密码（终端无回显 / 图形弹窗）；
-3. 强制校验：新 root 密码**不能与你当前用户的密码相同**，且不能为空、不能过短（至少 6 个字符）、不能等于用户名；
-4. 以 root 权限写入新密码，然后继续用刚设置的 root 密码完成本次认证；
-5. **提示是否禁用 sudo**：询问是否设置全局别名 `sudo=rtdo`（见下节「禁用 sudo（可选）」）。
+3. 强制校验：不能等于系统内任意用户名、不能与当前用户密码相同、至少 6 个字符、不含 `:`/换行；
+4. 写入新密码，然后继续用新密码完成本次认证。
 
-> 注意：在既没有终端也没有图形桌面的环境（如 cron 调用）中无法自动引导，rtdo 会拒绝执行并提示你手动运行 `sudo passwd`。
+也可以手动设置：
+
+```bash
+sudo passwd        # 普通用户执行（先验证你的用户密码）
+# 或
+su -c passwd       # 切到 root 后执行
+```
+
+> 无终端也无图形桌面的环境（如 cron）无法自动引导，rtdo 会拒绝执行并提示手动 `sudo passwd`。
 
 ## 禁用 sudo（可选）
 
-设置 root 密码后，rtdo 会询问你是否**禁用 sudo**：即写入全局别名文件 `/etc/profile.d/rtdo-alias.sh`，把所有 `sudo` 命令改为由 rtdo 提权（新终端生效）：
+每次运行 `rtdo` 时都会检查：**尚未启用 sudo 拦截**则询问是否禁用 sudo；已启用则跳过（不会重复询问）。
 
-```sh
-# /etc/profile.d/rtdo-alias.sh（由 rtdo 生成）
-if command -v rtdo >/dev/null 2>&1; then
-    alias sudo='rtdo'
-fi
-```
+选择「是」后：
 
-- 启用后，你在终端里敲 `sudo <命令>` 实际走的是 rtdo 的策略判定与确认流程（而不是 sudo 的全放行）；
-- 需要**恢复 sudo**：删除 `/etc/profile.d/rtdo-alias.sh` 并重新登录（或在新终端执行 `unalias sudo`）；
-- 也可以在引导时选择「不」，之后随时手动创建该文件启用；
-- 该别名只对交互式 shell 生效，不影响脚本、cron 等非交互环境。
+- 原版 sudo 移动为 `/usr/bin/sudo.real`；
+- `/usr/bin/sudo` 与 `/usr/bin/sudo-force` 变为 shim（Go 守护进程二进制，通过 argv[0] 区分）；
+- 注册并启动 systemd 服务 `rtdo-sudod.service`（监听 `/run/rtdo/sudo.sock`）；
+- 之后输入 `sudo <命令>`：守护进程拦截并提示：
+  > sudo 已被 rtdo 接管：请使用 rtdo \<命令\> 执行；确需原版 sudo 请用 sudo-force \<命令\>
+- 确需原版 sudo：`sudo-force <命令>`（例如 `sudo-force apt update`），行为与原版 sudo 完全一致；
+- 拦截是 **fail-closed**：守护进程不在时 `sudo` 依然被拦截提示（不会偷偷放行原版 sudo）。
 
-## 多语言
+恢复原版 sudo：`sudo ./rtdo.sh --uninstall`（完整还原），或手动 `rm /usr/bin/sudo /usr/bin/sudo-force && mv /usr/bin/sudo.real /usr/bin/sudo`。
 
-rtdo 的所有用户可见输出（帮助、提示、交互、错误）都支持**中英双语**，按以下规则自动选择（优先级从高到低）：
-
-| 变量 | 取值 | 语言 |
-|---|---|---|
-| `RTDO_LANG` | `zh*` | 中文 |
-| `RTDO_LANG` | 其他 | English |
-| `LC_ALL` / `LC_MESSAGES` / `LANG` | 以 `zh` 开头 | 中文 |
-| `LC_ALL` / `LC_MESSAGES` / `LANG` | 其他（如 `en_US.UTF-8`、`C`） | English |
-
-示例：
-
-```bash
-LANG=zh_CN.UTF-8 rtdo --help      # 中文
-RTDO_LANG=en rtdo --help          # English
-```
+> 注：0.1.0 时代的全局别名方案（`/etc/profile.d/rtdo-alias.sh`）已废弃——别名挡不住真实存在的 sudo 二进制（脚本/非交互环境照样绕过）。新方案用文件级 shim + 守护进程，任何调用方式都无法绕过。
 
 ## 使用
 
@@ -161,7 +165,7 @@ sudo rtdo --init
 
 | 参数 | 说明 |
 |---|---|
-| `--config <路径>` | 指定配置文件，默认 `/etc/rtdo/rtdo.conf`；也可以用环境变量 `RTDO_CONF` |
+| `--config <路径>` | 指定配置文件，默认 `/etc/rtdo/rtdo.conf`；也可用环境变量 `RTDO_CONF` |
 | `-h, --help` | 帮助 |
 | `-V, --version` | 版本 |
 
@@ -173,21 +177,19 @@ sudo rtdo --init
 | 终端会话 | 终端内输出操作摘要，等待输入 y / n（直接回车等于拒绝） |
 | 两者都没有 | 无法确认，默认拒绝，记入审计日志 |
 
-图形桌面下输入 root 密码也用弹窗（对应工具的密码框），终端下密码输入不回显。
+图形桌面下输入密码也用弹窗，终端下密码输入不回显。
 
 ## 配置文件
 
 默认位置 `/etc/rtdo/rtdo.conf`，TOML 格式：
 
 ```toml
-# 信任目录：命令作用到这些目录内时自动放行，不弹窗
 trusted_paths = [
     "/etc/nixos",
     "/home/*/.config",
     "/usr/local/bin"
 ]
 
-# 高危命令：任何情况下都会拦截，除非使用 --force
 blacklist_commands = [
     "dd",
     "mkfs",
@@ -195,43 +197,36 @@ blacklist_commands = [
     "chmod -R 777 /"
 ]
 
-# 审计日志路径
 audit_log = "/var/log/rtdo.log"
-
-# 日志格式: "json" 或 "text"
 log_format = "json"
 ```
 
-字段说明：
-
-- `trusted_paths`：按目录前缀匹配。命令涉及的所有路径（从参数里提取）都落在这些目录内时自动放行。支持通配符：`*` 匹配单层路径段内的任意字符，`**` 匹配任意层级，`?` 匹配单个字符。
-- `blacklist_commands`：单命令名按 basename 精确匹配（`dd` 命中任意位置调用的 dd）；带参数的命令按前缀匹配（`rm -rf /` 会命中 `rm -rf /tmp` 这类写法）。命中后直接拦截，`--force` 可放行。
-- `audit_log`：审计日志路径。
-- `log_format`：`json` 或 `text`。
-
-路径提取是启发式的：以 `/`、`.`、`~` 开头或包含 `/` 的参数视为路径（`--foo=/path` 这种选项值也会提取）。提取不到路径的命令（比如 `systemctl status`）一律走确认流程——拿不准就问你，这是有意为之，宁可多问一次也不悄悄放行。
+- `trusted_paths`：按目录前缀匹配，支持 `*` / `**` / `?` 通配符；命令涉及的所有路径都在其中时自动放行；
+- `blacklist_commands`：单命令名按 basename 精确匹配，带参数的命令按「命令名 + 参数前缀」匹配；命中直接拦截，`--force` 可放行；
+- `audit_log` / `log_format`：审计日志路径与格式（`json` / `text`）。
 
 ## 审计日志
 
-所有提权请求都会记录，包括被拦截和放行的。每条记录包含：
-
-- 执行时间
-- 操作用户（用户名和 UID）
-- 完整命令
-- 是否使用 `--force`
-- 最终结果（allow / deny / blocked）与原因（trusted_path、user_confirmed、user_denied、blacklist、force、auth_failed、root_password_setup、root_password_setup_failed 等）
-- 放行命令的退出码
-
-JSON 格式（默认）：
+所有提权请求都会记录（时间、用户、命令、是否 `--force`、结果与原因、退出码）。原因包括：`trusted_path`、`user_confirmed`、`user_denied`、`blacklist`、`force`、`auth_failed`、`root_password_setup`、`root_password_setup_failed`、`not_root`、`pam_setup_failed` 等。
 
 ```json
 {"time":"2026-08-28T19:00:00+08:00","user":"alice","uid":1000,"command":"nixos-rebuild switch","force":false,"result":"allow","reason":"user_confirmed","exit_code":0}
 ```
 
-text 格式：
+## 多语言
 
-```
-[2026-08-28T19:00:00+08:00] user=alice uid=1000 force=false result=blocked reason=blacklist cmd="dd if=/dev/zero of=/dev/sda"
+输出语言按以下规则自动选择（优先级从高到低）：
+
+| 变量 | 取值 | 语言 |
+|---|---|---|
+| `RTDO_LANG` | `zh*` | 中文 |
+| `RTDO_LANG` | 其他 | English |
+| `LC_ALL` / `LC_MESSAGES` / `LANG` | 以 `zh` 开头 | 中文 |
+| 其他 | 任意 | English |
+
+```bash
+LANG=zh_CN.UTF-8 rtdo --help      # 中文
+RTDO_LANG=en rtdo --help          # English
 ```
 
 ## 退出码
@@ -247,44 +242,49 @@ text 格式：
 ## 安全说明
 
 - 命令不经 shell：参数按字面传给命令，`$HOME`、管道、引号不会被解释；
-- 环境清理：以安全 PATH 运行，HOME/USER/LOGNAME 设为 root，移除 LD_PRELOAD / LD_LIBRARY_PATH；
-- 不含路径的命令会在安全 PATH 里解析成绝对路径再执行，防 PATH 劫持；
-- 非交互环境默认拒绝；
+- 环境清理：安全 PATH、HOME=/root、移除 LD_PRELOAD / LD_LIBRARY_PATH；
+- 不含路径的命令在安全 PATH 中解析成绝对路径再执行，防 PATH 劫持；
+- 非交互环境默认拒绝；sudo 拦截 fail-closed；
 - 黑名单是硬拦截，`--force` 是唯一的例外，用之前想清楚。
 
 ## 已知限制
 
-- root 账户被锁定或未设置密码（`/etc/shadow` 密码字段以 `!`/`*` 开头或为空）时，首次运行会自动引导设置（等价于 `sudo passwd`）；若处于无交互环境（无终端、无图形桌面）则会被拒绝并提示手动执行 `sudo passwd`；
+- root 账户被锁定或未设置密码时，首次/每次运行会自动引导设置；无交互环境则拒绝并提示手动 `sudo passwd`；
 - 图形弹窗依赖 zenity / kdialog / yad，最小化安装的系统需要自己装一个；
 - 路径提取是启发式的，复杂参数（通配符、重定向）可能识别不全，识别不了就进确认流程，不会悄悄放行；
-- 只支持 Linux（PAM 是 Linux 的东西）。
+- 只支持 Linux（PAM、systemd、unix socket 都是 Linux 的东西）；
+- 弱密码检测会遍历系统用户做 PAM 校验，用户很多的机器上每次认证略有开销。
 
-## 构建
+## 手动构建
 
 ```bash
-cargo build --release
-```
+# rtdo（Rust）
+cargo build --release        # 产物 target/release/rtdo
 
-产物在 `target/release/rtdo`。
+# rtdo-sudod（Go）
+cd daemon && CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags "-s -w" -o rtdo-sudod .
+```
 
 ## 测试
 
 简单冒烟：`./rtdo --help`、`./rtdo --version`，`sudo ./rtdo --init` 之后 `./rtdo --policy`。
 
-完整流程需要：setuid 安装 + 给 root 设密码（WSL 里 root 默认没有密码，先 `sudo passwd root`；也可以直接运行 `./rtdo <任意命令>`，首次运行引导会自动设置）+ 一个终端或图形桌面。黑名单拦截可以直接用 `rtdo dd if=/dev/zero of=/dev/null bs=1 count=1` 试，应当直接报拦截。
+完整流程需要：setuid 安装 + root 密码（可直接用首次运行引导自动设置）+ 一个终端或图形桌面。黑名单拦截可直接用 `rtdo dd if=/dev/zero of=/dev/null bs=1 count=1` 试，应当直接报拦截。
 
-## 贡献
-
-欢迎提 issue 和 PR。代码结构：
+## 代码结构
 
 - `src/main.rs` — 参数解析与主流程
 - `src/config.rs` — 配置加载与默认策略生成
 - `src/policy.rs` — 策略判定（黑名单 / 信任目录 / 路径提取）
-- `src/pam.rs` — PAM 认证（校验 root 密码）
+- `src/pam.rs` — PAM 认证（校验 root 密码、修改 root 密码）
 - `src/auth.rs` — 密码输入（终端无回显 / 图形密码框）
 - `src/interact.rs` — 环境自适应交互（终端 / 弹窗 / 拦截通知）
 - `src/audit.rs` — 审计日志（JSON / text）
 - `src/exec.rs` — 权限检查与安全执行
+- `src/i18n.rs` — 中英双语支持
+- `src/setup.rs` — 每次运行引导（root 密码检测与设置、弱密码检测、sudo 检查、守护进程拦截安装）
+- `daemon/main.go` — rtdo-sudod：Go 守护进程 + sudo/sudo-force shim
+- `rtdo.sh` — 一键安装 / 卸载
 
 ## 许可证与贡献者
 
@@ -295,4 +295,4 @@ MIT License，Copyright (c) 2026 Reimilia617
 - **Reimilia617** — 项目发起、需求与产品设计
 - **DeepSeek（AI 助手）** — 代码实现、架构设计与文档协作
 
-这个项目是人和 AI 结对完成的：方向与需求由 Reimilia617 定，实现细节一起推敲。发现 bug 或有更好的想法，欢迎直接提 issue。
+发现 bug 或有更好的想法，欢迎直接提 issue。

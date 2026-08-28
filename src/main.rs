@@ -335,6 +335,13 @@ fn run_command(argv: &[String], force: bool, config_path: Option<&str>) -> ExitC
 
     // 4. 认证：非 root 直接调用时，必须验证 root 密码
     if exec::real_uid() != 0 {
+        // 4.0. sudo 前置：未安装 sudo 时提示先安装并配置（不阻塞，rtdo 本身不依赖 sudo）
+        if !setup::sudo_available() {
+            for hint in setup::check_sudo_ready() {
+                eprintln!("{}", hint);
+            }
+        }
+
         if let Err(e) = pam::ensure_pam_service() {
             eprintln!("rtdo: {}", e);
             audit::log(
@@ -347,8 +354,7 @@ fn run_command(argv: &[String], force: bool, config_path: Option<&str>) -> ExitC
 
         // 4a. 首次运行引导：root 密码未设置（/etc/shadow 为空、! 锁定或 * 禁用）时，
         //     强制进入设置流程（等价于自动执行 `sudo passwd`）：
-        //     验证当前用户密码 -> 输入两次新的 root 密码 -> 校验新密码不与当前用户密码相同 -> 写入
-        //     -> 询问是否禁用 sudo（全局别名 sudo=rtdo）。
+        //     验证当前用户密码 -> 输入两次新的 root 密码 -> 校验约束 -> 写入。
         if !setup::root_password_set() {
             match setup::bootstrap_root_password(&exec::current_user()) {
                 Ok(()) => {
@@ -359,17 +365,6 @@ fn run_command(argv: &[String], force: bool, config_path: Option<&str>) -> ExitC
                             "rtdo: root password set. Please use the new root password to authenticate."
                         )
                     );
-                    // 提示是否禁用 sudo（设置全局别名 sudo=rtdo）
-                    if let Err(e) = setup::offer_disable_sudo() {
-                        eprintln!(
-                            "{}",
-                            crate::t!(
-                                "rtdo: 警告: 设置 sudo→rtdo 别名失败: {}",
-                                "rtdo: warning: failed to set sudo→rtdo alias: {}",
-                                e
-                            )
-                        );
-                    }
                     audit::log(
                         &audit::AuditEntry::new(&full_cmd, force, "allow", "root_password_setup"),
                         &cfg.audit_log,
@@ -408,7 +403,48 @@ fn run_command(argv: &[String], force: bool, config_path: Option<&str>) -> ExitC
                 }
             };
             match pam::verify_root_password(&password) {
-                Ok(()) => break,
+                Ok(()) => {
+                    // 4b. 弱密码检查：root 密码等于系统内任意用户名或任意用户的密码时，
+                    //     强制重新设置（继续跳出设置界面），设置完成后用新密码重新认证。
+                    if setup::root_password_weak(&password) {
+                        eprintln!(
+                            "{}",
+                            crate::t!(
+                                "rtdo: 检测到 root 密码与系统内用户名或其他用户密码相同，需要重新设置。",
+                                "rtdo: the root password matches a system username or another \
+                                 user's password; it must be reset."
+                            )
+                        );
+                        match setup::bootstrap_root_password(&exec::current_user()) {
+                            Ok(()) => {
+                                println!(
+                                    "{}",
+                                    crate::t!(
+                                        "rtdo: root 密码已重新设置，请用新密码完成认证。",
+                                        "rtdo: root password reset; authenticate with the new password."
+                                    )
+                                );
+                                attempts = 3;
+                                continue;
+                            }
+                            Err(e) => {
+                                eprintln!("rtdo: {}", e);
+                                audit::log(
+                                    &audit::AuditEntry::new(
+                                        &full_cmd,
+                                        force,
+                                        "blocked",
+                                        "root_password_setup_failed",
+                                    ),
+                                    &cfg.audit_log,
+                                    &cfg.log_format,
+                                );
+                                return ExitCode::from(1);
+                            }
+                        }
+                    }
+                    break;
+                }
                 Err(e) => {
                     attempts -= 1;
                     if attempts == 0 {
@@ -437,6 +473,18 @@ fn run_command(argv: &[String], force: bool, config_path: Option<&str>) -> ExitC
                     );
                 }
             }
+        }
+
+        // 4c. 每次运行检查：尚未禁用 sudo 时询问是否启用守护进程拦截（已启用则跳过）
+        if let Err(e) = setup::offer_disable_sudo() {
+            eprintln!(
+                "{}",
+                crate::t!(
+                    "rtdo: 警告: 检查/设置 sudo 拦截失败: {}",
+                    "rtdo: warning: failed to check/set up sudo interception: {}",
+                    e
+                )
+            );
         }
     }
 
