@@ -39,6 +39,8 @@ pub const SYSTEMD_UNIT_PATH: &str = "/etc/systemd/system/rtdo-sudod.service";
 pub const SUDO_DISABLED_MARKER: &str = "/etc/rtdo/sudo-disabled";
 /// 标记文件：存在即表示已询问过“是否禁用 sudo”（无论回答是与否，之后不再询问）。
 pub const DISABLE_SUDO_ASKED_MARKER: &str = "/etc/rtdo/.disable-sudo-asked";
+/// 弱密码检查缓存：记录检查时 root 的 shadow 哈希，root 密码未变则跳过昂贵的检查。
+pub const WEAK_CHECK_CACHE: &str = "/etc/rtdo/.root-pw-weak-cache";
 /// 旧版本遗留的全局别名文件（不再使用，安装拦截时清理）。
 pub const LEGACY_ALIAS_PATH: &str = "/etc/profile.d/rtdo-alias.sh";
 
@@ -161,23 +163,119 @@ pub fn root_password_set() -> bool {
     false
 }
 
-/// root 密码是否“过弱”：等于系统内任意一个用户名，或等于任意一个用户的密码。
+/// 读取 /etc/shadow 中所有本地用户（用户名, 密码哈希字段）。
+///
+/// 直接读文件，不经过 NSS：避免 LDAP/AD/SSSD 等网络认证源导致检查挂起。
+fn shadow_users() -> Vec<(String, String)> {
+    let content = match std::fs::read_to_string("/etc/shadow") {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    content
+        .lines()
+        .filter_map(|l| {
+            let mut parts = l.split(':');
+            let name = parts.next()?;
+            let hash = parts.next().unwrap_or("");
+            if name.is_empty() {
+                return None;
+            }
+            Some((name.to_string(), hash.to_string()))
+        })
+        .collect()
+}
+
+/// root 当前的 shadow 密码哈希字段。
+fn root_shadow_hash() -> Option<String> {
+    shadow_users()
+        .into_iter()
+        .find(|(n, _)| n == "root")
+        .map(|(_, h)| h)
+}
+
+/// root 密码是否“过弱”：等于系统内任意一个用户名，或等于任意一个本地用户的密码。
+///
+/// 性能与防挂起设计：
+/// * 用户名比对直接读 /etc/passwd（本地文件，不经过 NSS）；
+/// * 密码比对直接用 libc `crypt(3)` 逐一比对 /etc/shadow 中**本地用户**的哈希
+///   （不启动 PAM、不经过 NSS/LDAP/AD，避免在网络认证源或用户很多的机器上长时间阻塞）；
+/// * 结果按 root 的 shadow 哈希缓存（`/etc/rtdo/.root-pw-weak-cache`）：
+///   root 密码未变更时直接复用上次结论，只在密码变更后重新检查一次。
 ///
 /// 用途：认证通过后若发现 root 密码过弱，强制重新设置（等价于再次跳出设置界面）。
 pub fn root_password_weak(pw: &str) -> bool {
-    let usernames = system_usernames();
-    if usernames.iter().any(|u| u == pw) {
+    // 1. 用户名比对（快，每次执行）
+    if system_usernames().iter().any(|u| u == pw) {
         return true;
     }
-    for u in &usernames {
-        if u == "root" {
-            continue;
-        }
-        if crate::pam::verify_password(u, pw).is_ok() {
-            return true;
+
+    // 2. 本地用户密码比对（带缓存：root 密码未变则跳过）
+    let root_hash = root_shadow_hash();
+    if let Some(h) = &root_hash {
+        if let Ok(cached) = std::fs::read_to_string(WEAK_CHECK_CACHE) {
+            if cached.trim() == h.trim() {
+                return false;
+            }
         }
     }
-    false
+
+    let mut weak = false;
+    for (u, hash) in shadow_users() {
+        if u == "root" || hash.is_empty() || hash.starts_with('!') || hash.starts_with('*') {
+            continue; // root 自身（与自己的哈希恒匹配）以及锁定/无密码账户跳过
+        }
+        if crypt_matches(pw, &hash) {
+            weak = true;
+            break;
+        }
+    }
+
+    // 记录本次检查时的 root 哈希，密码不变则下次直接跳过
+    if let Some(h) = root_hash {
+        if let Some(dir) = Path::new(WEAK_CHECK_CACHE).parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(WEAK_CHECK_CACHE, h);
+    }
+    weak
+}
+
+/// 用 libc `crypt(3)` 校验明文密码是否匹配给定哈希（运行时 dlopen libcrypt，零构建依赖）。
+///
+/// `crypt(key, salt)` 以哈希串本身作为盐，结果等于该哈希即为匹配。
+fn crypt_matches(pw: &str, hash: &str) -> bool {
+    use std::ffi::{c_char, CStr, CString};
+
+    unsafe {
+        let lib = libc::dlopen(
+            b"libcrypt.so.1\0".as_ptr() as *const c_char,
+            libc::RTLD_LAZY,
+        );
+        if lib.is_null() {
+            return false;
+        }
+        let sym = libc::dlsym(lib, b"crypt\0".as_ptr() as *const c_char);
+        if sym.is_null() {
+            return false;
+        }
+        type CryptFn = unsafe extern "C" fn(*const c_char, *const c_char) -> *mut c_char;
+        let crypt_fn: CryptFn = std::mem::transmute(sym);
+
+        let key = match CString::new(pw) {
+            Ok(k) => k,
+            Err(_) => return false,
+        };
+        let salt = match CString::new(hash) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        let out = crypt_fn(key.as_ptr(), salt.as_ptr());
+        if out.is_null() {
+            return false;
+        }
+        let got = CStr::from_ptr(out).to_string_lossy();
+        got.as_ref() == hash
+    }
 }
 
 /// 引导设置 root 密码（等价于自动执行 `sudo passwd`）。
