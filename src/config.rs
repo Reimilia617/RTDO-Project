@@ -33,8 +33,9 @@ impl Config {
         if lf.is_empty() {
             self.log_format = "json".to_string();
         } else if lf != "json" && lf != "text" {
-            return Err(format!(
+            return Err(crate::t!(
                 "log_format 只能是 json 或 text，当前: {}",
+                "log_format must be json or text, got: {}",
                 self.log_format
             ));
         } else {
@@ -55,10 +56,22 @@ fn config_path(override_path: Option<&str>) -> String {
 /// 加载配置。
 pub fn load(override_path: Option<&str>) -> Result<Config, String> {
     let path = config_path(override_path);
-    let content = std::fs::read_to_string(&path)
-        .map_err(|e| format!("无法读取配置文件 {}: {}", path, e))?;
-    let mut cfg: Config =
-        toml::from_str(&content).map_err(|e| format!("配置文件 {} 解析失败: {}", path, e))?;
+    let content = std::fs::read_to_string(&path).map_err(|e| {
+        crate::t!(
+            "无法读取配置文件 {}: {}",
+            "cannot read config file {}: {}",
+            path,
+            e
+        )
+    })?;
+    let mut cfg: Config = toml::from_str(&content).map_err(|e| {
+        crate::t!(
+            "配置文件 {} 解析失败: {}",
+            "failed to parse config {}: {}",
+            path,
+            e
+        )
+    })?;
     cfg.normalize()?;
     Ok(cfg)
 }
@@ -93,32 +106,74 @@ log_format = "json"
     .to_string()
 }
 
-/// `rtdo --init`：生成默认配置与 PAM 认证服务文件（需要 root）。
+/// `rtdo --init`：检查 sudo 前置条件、生成默认配置与 PAM 认证服务文件（需要 root）。
 pub fn init(override_path: Option<&str>) -> ExitCode {
     let path = config_path(override_path);
 
     if !crate::exec::is_root() {
-        eprintln!("rtdo: --init 需要 root 权限，请使用 `sudo rtdo --init`。");
+        eprintln!(
+            "{}",
+            crate::t!(
+                "rtdo: --init 需要 root 权限，请使用 `sudo rtdo --init`。",
+                "rtdo: --init requires root; run `sudo rtdo --init`."
+            )
+        );
         return ExitCode::from(1);
+    }
+
+    // 安装前置检查：sudo 是否已安装并正确配置（提示先装好 sudo 再安装 rtdo）
+    eprintln!("{}", crate::t!("检查 sudo 前置条件…", "Checking sudo prerequisite…"));
+    for hint in crate::setup::check_sudo_ready() {
+        eprintln!("{}", hint);
     }
 
     // 创建配置目录
     if let Some(dir) = std::path::Path::new(&path).parent() {
         if !dir.as_os_str().is_empty() && !dir.exists() {
             if let Err(e) = std::fs::create_dir_all(dir) {
-                eprintln!("rtdo: 无法创建目录 {}: {}", dir.display(), e);
+                eprintln!(
+                    "{}",
+                    crate::t!(
+                        "rtdo: 无法创建目录 {}: {}",
+                        "rtdo: cannot create directory {}: {}",
+                        dir.display(),
+                        e
+                    )
+                );
                 return ExitCode::from(1);
             }
         }
     }
 
     if std::path::Path::new(&path).exists() {
-        eprintln!("rtdo: 配置文件已存在，未覆盖: {}", path);
+        eprintln!(
+            "{}",
+            crate::t!(
+                "rtdo: 配置文件已存在，未覆盖: {}",
+                "rtdo: config file already exists, not overwritten: {}",
+                path
+            )
+        );
     } else {
         match std::fs::write(&path, default_content()) {
-            Ok(()) => println!("rtdo: 已生成默认配置: {}", path),
+            Ok(()) => println!(
+                "{}",
+                crate::t!(
+                    "rtdo: 已生成默认配置: {}",
+                    "rtdo: default config written: {}",
+                    path
+                )
+            ),
             Err(e) => {
-                eprintln!("rtdo: 无法写入配置文件 {}: {}", path, e);
+                eprintln!(
+                    "{}",
+                    crate::t!(
+                        "rtdo: 无法写入配置文件 {}: {}",
+                        "rtdo: cannot write config file {}: {}",
+                        path,
+                        e
+                    )
+                );
                 return ExitCode::from(1);
             }
         }
@@ -126,8 +181,17 @@ pub fn init(override_path: Option<&str>) -> ExitCode {
 
     // PAM 认证服务（rtdo 依赖它校验 root 密码）
     match crate::pam::ensure_pam_service() {
-        Ok(()) => println!("rtdo: PAM 认证服务已就绪 (/etc/pam.d/rtdo)"),
-        Err(e) => eprintln!("rtdo: 警告: {}", e),
+        Ok(()) => println!(
+            "{}",
+            crate::t!(
+                "rtdo: PAM 认证服务已就绪 (/etc/pam.d/rtdo)",
+                "rtdo: PAM auth service ready (/etc/pam.d/rtdo)"
+            )
+        ),
+        Err(e) => eprintln!(
+            "{}",
+            crate::t!("rtdo: 警告: {}", "rtdo: warning: {}", e)
+        ),
     }
 
     ExitCode::SUCCESS
@@ -137,30 +201,48 @@ pub fn init(override_path: Option<&str>) -> ExitCode {
 pub fn print_policy(override_path: Option<&str>) -> ExitCode {
     match load(override_path) {
         Ok(cfg) => {
-            println!("rtdo 策略（{}）", config_path(override_path));
-            println!("信任目录:");
+            println!(
+                "{}",
+                crate::t!("rtdo 策略（{}）", "rtdo policy ({})", config_path(override_path))
+            );
+            println!("{}", crate::t!("信任目录:", "trusted paths:"));
             if cfg.trusted_paths.is_empty() {
-                println!("  （无，所有命令都需要确认）");
+                println!(
+                    "{}",
+                    crate::t!("  （无，所有命令都需要确认）", "  (none — every command needs confirmation)")
+                );
             } else {
                 for t in &cfg.trusted_paths {
                     println!("  {}", t);
                 }
             }
-            println!("高危命令:");
+            println!("{}", crate::t!("高危命令:", "blacklist:"));
             if cfg.blacklist_commands.is_empty() {
-                println!("  （无）");
+                println!("{}", crate::t!("  （无）", "  (none)"));
             } else {
                 for b in &cfg.blacklist_commands {
                     println!("  {}", b);
                 }
             }
-            println!("审计日志: {}", cfg.audit_log);
-            println!("日志格式: {}", cfg.log_format);
+            println!(
+                "{}",
+                crate::t!("审计日志: {}", "audit log: {}", cfg.audit_log)
+            );
+            println!(
+                "{}",
+                crate::t!("日志格式: {}", "log format: {}", cfg.log_format)
+            );
             ExitCode::SUCCESS
         }
         Err(e) => {
             eprintln!("rtdo: {}", e);
-            eprintln!("提示: 可运行 `sudo rtdo --init` 生成默认配置。");
+            eprintln!(
+                "{}",
+                crate::t!(
+                    "提示: 可运行 `sudo rtdo --init` 生成默认配置。",
+                    "hint: run `sudo rtdo --init` to generate the default config."
+                )
+            );
             ExitCode::from(1)
         }
     }

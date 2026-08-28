@@ -74,23 +74,59 @@ pub fn confirm(cmd_display: &str, args_display: &str) -> Result<Confirm, String>
     match detect_channel() {
         Channel::Terminal => confirm_terminal(cmd_display, args_display),
         Channel::Gui => confirm_gui(cmd_display, args_display),
-        Channel::None => Err(
-            "无法交互：既非终端也无可用的图形对话框，已默认拒绝（可使用 --force 跳过确认）"
-                .to_string(),
-        ),
+        Channel::None => Err(crate::t!(
+            "无法交互：既非终端也无可用的图形对话框，已默认拒绝（可使用 --force 跳过确认）",
+            "cannot interact: no terminal or GUI dialog available; denied by default (use --force to skip confirmation)"
+        )),
     }
+}
+
+/// 终端内确认（通用 y/N 读取，prompt 由调用方提供）。
+pub fn confirm_yes_no(prompt: &str) -> Result<bool, String> {
+    if !tty_available() && !std::io::stdin().is_terminal() {
+        return Err(crate::t!(
+            "无法交互：既非终端也无可用的图形对话框",
+            "cannot interact: no terminal or GUI dialog available"
+        ));
+    }
+    let mut err = std::io::stderr();
+    let _ = write!(err, "{}", prompt);
+    let _ = err.flush();
+    let line = read_line_interactive();
+    let t = line.trim().to_lowercase();
+    Ok(t == "y" || t == "yes")
 }
 
 /// 终端内确认。
 fn confirm_terminal(cmd_display: &str, args_display: &str) -> Result<Confirm, String> {
     let mut err = std::io::stderr();
-    let _ = writeln!(err, "rtdo: 请求以 root 身份执行命令");
-    let _ = writeln!(err, "  命令: {}", cmd_display);
+    let _ = writeln!(
+        err,
+        "{}",
+        crate::t!("rtdo: 请求以 root 身份执行命令", "rtdo: request to run command as root")
+    );
+    let _ = writeln!(
+        err,
+        "{}",
+        crate::t!("  命令: {}", "  command: {}", cmd_display)
+    );
     if !args_display.is_empty() {
-        let _ = writeln!(err, "  参数: {}", args_display);
+        let _ = writeln!(
+            err,
+            "{}",
+            crate::t!("  参数: {}", "  args: {}", args_display)
+        );
     }
-    let _ = writeln!(err, "  用户: {}", crate::exec::current_user());
-    let _ = write!(err, "允许执行？[y/N] ");
+    let _ = writeln!(
+        err,
+        "{}",
+        crate::t!("  用户: {}", "  user: {}", crate::exec::current_user())
+    );
+    let _ = write!(
+        err,
+        "{}",
+        crate::t!("允许执行？[y/N] ", "Allow? [y/N] ")
+    );
     let _ = err.flush();
 
     let line = read_line_interactive();
@@ -104,23 +140,40 @@ fn confirm_terminal(cmd_display: &str, args_display: &str) -> Result<Confirm, St
 
 /// 图形弹窗确认（zenity / kdialog / yad）。
 fn confirm_gui(cmd_display: &str, args_display: &str) -> Result<Confirm, String> {
-    let mut text = format!("rtdo 请求以 root 身份执行:\n\n命令: {}\n", cmd_display);
+    let mut text = format!(
+        "{}\n\n{}: {}\n",
+        crate::t!(
+            "rtdo 请求以 root 身份执行:",
+            "rtdo requests to run as root:"
+        ),
+        crate::t!("命令", "command"),
+        cmd_display
+    );
     if !args_display.is_empty() {
-        text.push_str(&format!("参数: {}\n", args_display));
+        text.push_str(&format!(
+            "{}: {}\n",
+            crate::t!("参数", "args"),
+            args_display
+        ));
     }
-    text.push_str(&format!("\n用户: {}\n\n是否允许？", crate::exec::current_user()));
+    text.push_str(&format!(
+        "\n{}: {}\n\n{}",
+        crate::t!("用户", "user"),
+        crate::exec::current_user(),
+        crate::t!("是否允许？", "Allow?")
+    ));
 
     if let Some(z) = find_tool(&["zenity"]) {
         let st = Command::new(z)
             .arg("--question")
             .arg("--title")
-            .arg("rtdo — 提权确认")
+            .arg(crate::t!("rtdo — 提权确认", "rtdo — privilege confirmation"))
             .arg("--text")
             .arg(&text)
             .arg("--ok-label")
-            .arg("同意")
+            .arg(crate::t!("同意", "Allow"))
             .arg("--cancel-label")
-            .arg("拒绝")
+            .arg(crate::t!("拒绝", "Deny"))
             .status();
         if let Ok(s) = st {
             return Ok(if s.success() { Confirm::Yes } else { Confirm::No });
@@ -131,7 +184,7 @@ fn confirm_gui(cmd_display: &str, args_display: &str) -> Result<Confirm, String>
             .arg("--yesno")
             .arg(&text)
             .arg("--title")
-            .arg("rtdo — 提权确认")
+            .arg(crate::t!("rtdo — 提权确认", "rtdo — privilege confirmation"))
             .status();
         if let Ok(s) = st {
             return Ok(if s.success() { Confirm::Yes } else { Confirm::No });
@@ -141,19 +194,22 @@ fn confirm_gui(cmd_display: &str, args_display: &str) -> Result<Confirm, String>
         let st = Command::new(y)
             .arg("--question")
             .arg("--title")
-            .arg("rtdo — 提权确认")
+            .arg(crate::t!("rtdo — 提权确认", "rtdo — privilege confirmation"))
             .arg("--text")
             .arg(&text)
             .arg("--button")
-            .arg("同意:0")
+            .arg(format!("{}:0", crate::t!("同意", "Allow")))
             .arg("--button")
-            .arg("拒绝:1")
+            .arg(format!("{}:1", crate::t!("拒绝", "Deny")))
             .status();
         if let Ok(s) = st {
             return Ok(if s.success() { Confirm::Yes } else { Confirm::No });
         }
     }
-    Err("图形环境未检测到可用的对话框工具 (zenity/kdialog/yad)".to_string())
+    Err(crate::t!(
+        "图形环境未检测到可用的对话框工具 (zenity/kdialog/yad)",
+        "no dialog tool found in GUI environment (zenity/kdialog/yad)"
+    ))
 }
 
 /// 通知用户命令已被拦截（黑名单）。
@@ -161,25 +217,60 @@ fn confirm_gui(cmd_display: &str, args_display: &str) -> Result<Confirm, String>
 pub fn notify_blocked(cmd_display: &str, args_display: &str, reason: &str) {
     match detect_channel() {
         Channel::Terminal => {
-            eprintln!("rtdo: 已拦截命令");
-            eprintln!("  命令: {}", cmd_display);
+            eprintln!(
+                "{}",
+                crate::t!("rtdo: 已拦截命令", "rtdo: command blocked")
+            );
+            eprintln!(
+                "{}",
+                crate::t!("  命令: {}", "  command: {}", cmd_display)
+            );
             if !args_display.is_empty() {
-                eprintln!("  参数: {}", args_display);
+                eprintln!(
+                    "{}",
+                    crate::t!("  参数: {}", "  args: {}", args_display)
+                );
             }
-            eprintln!("  原因: {}", reason);
-            eprintln!("提示: 如确需执行，请使用 `rtdo --force ...`（风险自负）");
+            eprintln!(
+                "{}",
+                crate::t!("  原因: {}", "  reason: {}", reason)
+            );
+            eprintln!(
+                "{}",
+                crate::t!(
+                    "提示: 如确需执行，请使用 `rtdo --force ...`（风险自负）",
+                    "hint: if you really need to run it, use `rtdo --force ...` (at your own risk)"
+                )
+            );
         }
         Channel::Gui => {
-            let mut text = format!("rtdo 已拦截高危命令:\n\n命令: {}\n", cmd_display);
+            let mut text = format!(
+                "{}\n\n{}: {}\n",
+                crate::t!("rtdo 已拦截高危命令:", "rtdo blocked a dangerous command:"),
+                crate::t!("命令", "command"),
+                cmd_display
+            );
             if !args_display.is_empty() {
-                text.push_str(&format!("参数: {}\n", args_display));
+                text.push_str(&format!(
+                    "{}: {}\n",
+                    crate::t!("参数", "args"),
+                    args_display
+                ));
             }
-            text.push_str(&format!("\n原因: {}\n\n如需强制放行请使用 --force。", reason));
+            text.push_str(&format!(
+                "\n{}: {}\n\n{}",
+                crate::t!("原因", "reason"),
+                reason,
+                crate::t!(
+                    "如需强制放行请使用 --force。",
+                    "use --force to force-run it."
+                )
+            ));
             if let Some(z) = find_tool(&["zenity"]) {
                 let _ = Command::new(z)
                     .arg("--info")
                     .arg("--title")
-                    .arg("rtdo — 已拦截")
+                    .arg(crate::t!("rtdo — 已拦截", "rtdo — blocked"))
                     .arg("--text")
                     .arg(&text)
                     .status();
@@ -188,20 +279,28 @@ pub fn notify_blocked(cmd_display: &str, args_display: &str, reason: &str) {
                     .arg("--msgbox")
                     .arg(&text)
                     .arg("--title")
-                    .arg("rtdo — 已拦截")
+                    .arg(crate::t!("rtdo — 已拦截", "rtdo — blocked"))
                     .status();
             } else if let Some(y) = find_tool(&["yad"]) {
                 let _ = Command::new(y)
                     .arg("--info")
                     .arg("--title")
-                    .arg("rtdo — 已拦截")
+                    .arg(crate::t!("rtdo — 已拦截", "rtdo — blocked"))
                     .arg("--text")
                     .arg(&text)
                     .status();
             }
         }
         Channel::None => {
-            eprintln!("rtdo: 已拦截命令 {}（{}）", cmd_display, reason);
+            eprintln!(
+                "{}",
+                crate::t!(
+                    "rtdo: 已拦截命令 {}（{}）",
+                    "rtdo: blocked command {} ({})",
+                    cmd_display,
+                    reason
+                )
+            );
         }
     }
 }

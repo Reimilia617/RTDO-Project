@@ -32,21 +32,39 @@ pub fn current_user() -> String {
     format!("uid-{}", uid)
 }
 
+/// 将真实 UID/GID 也置为 root（setuid 安装时 euid 已为 0，此处补齐 real uid）。
+///
+/// 用途：pam_unix 修改密码时按真实 UID 判断是否需要旧密码；PAM 修改 root
+/// 密码前调用，使 pam_chauthtok 只索要新密码（等价于 root 直接执行 passwd）。
+pub fn become_real_root() {
+    unsafe {
+        libc::setgid(0);
+        libc::setuid(0);
+    }
+}
+
 /// 以 root 运行命令时使用的安全 PATH。
 const SAFE_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
-/// 解析命令：含 `/` 的直接使用；否则在安全 PATH 中查找绝对路径（防止 PATH 劫持）。
-fn resolve_command(cmd: &str) -> String {
+/// 在安全 PATH 中查找命令的绝对路径；找不到返回 None。
+///
+/// 含 `/` 的命令直接返回原样（视为绝对/相对路径）。
+pub fn find_in_safe_path(cmd: &str) -> Option<String> {
     if cmd.contains('/') {
-        return cmd.to_string();
+        return Some(cmd.to_string());
     }
     for dir in SAFE_PATH.split(':') {
         let p = std::path::Path::new(dir).join(cmd);
         if p.is_file() {
-            return p.to_string_lossy().into_owned();
+            return Some(p.to_string_lossy().into_owned());
         }
     }
-    cmd.to_string()
+    None
+}
+
+/// 解析命令：含 `/` 的直接使用；否则在安全 PATH 中查找绝对路径（防止 PATH 劫持）。
+fn resolve_command(cmd: &str) -> String {
+    find_in_safe_path(cmd).unwrap_or_else(|| cmd.to_string())
 }
 
 /// 以 root 身份执行命令，返回子进程退出码。
@@ -56,10 +74,7 @@ fn resolve_command(cmd: &str) -> String {
 /// * 使用安全 PATH 解析命令绝对路径，不经过 shell 解释；
 /// * 清理环境：HOME=/root、USER/LOGNAME=root，移除 LD_PRELOAD / LD_LIBRARY_PATH。
 pub fn run_as_root(argv: &[String]) -> i32 {
-    unsafe {
-        libc::setgid(0);
-        libc::setuid(0);
-    }
+    become_real_root();
 
     let resolved = resolve_command(&argv[0]);
     let mut cmd = Command::new(&resolved);
@@ -74,7 +89,15 @@ pub fn run_as_root(argv: &[String]) -> i32 {
     match cmd.status() {
         Ok(status) => propagate(status),
         Err(e) => {
-            eprintln!("rtdo: 无法执行 {}: {}", resolved, e);
+            eprintln!(
+                "{}",
+                crate::t!(
+                    "rtdo: 无法执行 {}: {}",
+                    "rtdo: failed to run {}: {}",
+                    resolved,
+                    e
+                )
+            );
             1
         }
     }
@@ -89,7 +112,14 @@ fn propagate(status: ExitStatus) -> i32 {
     {
         use std::os::unix::process::ExitStatusExt;
         if let Some(sig) = status.signal() {
-            eprintln!("rtdo: 命令被信号 {} 终止", sig);
+            eprintln!(
+                "{}",
+                crate::t!(
+                    "rtdo: 命令被信号 {} 终止",
+                    "rtdo: command terminated by signal {}",
+                    sig
+                )
+            );
             return 128 + sig;
         }
     }

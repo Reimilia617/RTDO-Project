@@ -68,10 +68,25 @@ pub fn log(entry: &AuditEntry, log_path: &str, format: &str) {
         Ok(mut f) => {
             use std::io::Write;
             if let Err(e) = writeln!(f, "{}", line) {
-                eprintln!("rtdo: 警告: 写入审计日志失败: {}", e);
+                eprintln!(
+                    "{}",
+                    crate::t!(
+                        "rtdo: 警告: 写入审计日志失败: {}",
+                        "rtdo: warning: failed to write audit log: {}",
+                        e
+                    )
+                );
             }
         }
-        Err(e) => eprintln!("rtdo: 警告: 无法打开审计日志 {}: {}", log_path, e),
+        Err(e) => eprintln!(
+            "{}",
+            crate::t!(
+                "rtdo: 警告: 无法打开审计日志 {}: {}",
+                "rtdo: warning: cannot open audit log {}: {}",
+                log_path,
+                e
+            )
+        ),
     }
 }
 

@@ -28,7 +28,7 @@ rtdo 是一个「带策略的 sudo」。你用它在终端里执行命令时，�
 
 1. **权限检查**：进程必须拥有 root 权限（二进制以 setuid root 安装，或直接由 root/sudo 调用）。
 2. **加载策略**：读取 `/etc/rtdo/rtdo.conf`。
-3. **认证**：普通用户调用时，要求输入 **root 密码**（PAM 校验，不是你自己账户的密码），错误最多重试 3 次；root 直接调用则跳过。
+3. **认证**：普通用户调用时，要求输入 **root 密码**（PAM 校验，不是你自己账户的密码），错误最多重试 3 次；root 直接调用则跳过。若 root 密码尚未设置，首次运行会自动引导设置（见「首次使用：设置 root 密码」）。
 4. **策略判定**：
    - 命中黑名单 → 直接拦截，弹窗或终端告知原因；
    - 命令涉及的全部路径都在信任目录内 → 自动放行；
@@ -65,7 +65,81 @@ sudo rtdo --init
 
 `--init` 会生成默认配置 `/etc/rtdo/rtdo.conf`，同时生成 PAM 认证服务文件 `/etc/pam.d/rtdo`（rtdo 靠它校验 root 密码；如果该文件缺失，首次运行时也会自动补建）。
 
+### 安装前置：需要 sudo
+
+rtdo 的安装与日常运维（如手动 `sudo passwd`）依赖 sudo，因此**安装 rtdo 前请先确认 sudo 已安装并正确配置**（当前用户已在 sudo/wheel 组）：
+
+```bash
+# Debian/Ubuntu
+sudo apt install sudo && sudo usermod -aG sudo <你的用户名>
+# Fedora/RHEL
+sudo dnf install sudo && sudo usermod -aG wheel <你的用户名>
+# Arch
+sudo pacman -S sudo && sudo usermod -aG wheel <你的用户名>
+# 加入组后需重新登录生效
+```
+
+rtdo 会在 `--init` 和首次运行引导时自动检测：**如果检测到 sudo 缺失或当前用户不在 sudo/wheel 组，会明确提示你先安装并正确配置 sudo，再继续安装 rtdo**。
+
 为什么要 setuid：rtdo 需要以 root 身份去校验密码、执行命令，setuid 是让普通用户进入这个流程的标准做法（sudo 自己也是这么装的）。如果只打算给 root 自己用，不设 setuid 直接以 root 调用也行，只是会跳过密码输入。
+
+## 首次使用：设置 root 密码（必读）
+
+rtdo 认证的是 **root 密码**，不是你自己账户的密码。**如果 root 账户没有密码，rtdo 无法工作**——比如 WSL 里 root 默认没有密码、部分发行版默认锁定 root（`/etc/shadow` 中 root 行以 `!` 或 `*` 开头）。
+
+手动设置 root 密码（二选一）：
+
+```bash
+# 普通用户执行（sudo 会先验证你的用户密码，再让你设置新的 root 密码）
+sudo passwd
+
+# 或先切到 root 用户，再执行 passwd（无参数即修改 root 自己的密码）
+su -c passwd
+```
+
+**首次运行自动引导**：当检测到 root 密码未设置时，非 root 用户第一次运行 `rtdo <命令>` 会自动进入**强制设置流程**（等价于自动执行 `sudo passwd`），无法跳过：
+
+1. 验证你当前用户的密码（确认操作者身份，最多 3 次机会）；
+2. 输入两次新的 root 密码（终端无回显 / 图形弹窗）；
+3. 强制校验：新 root 密码**不能与你当前用户的密码相同**，且不能为空、不能过短（至少 6 个字符）、不能等于用户名；
+4. 以 root 权限写入新密码，然后继续用刚设置的 root 密码完成本次认证；
+5. **提示是否禁用 sudo**：询问是否设置全局别名 `sudo=rtdo`（见下节「禁用 sudo（可选）」）。
+
+> 注意：在既没有终端也没有图形桌面的环境（如 cron 调用）中无法自动引导，rtdo 会拒绝执行并提示你手动运行 `sudo passwd`。
+
+## 禁用 sudo（可选）
+
+设置 root 密码后，rtdo 会询问你是否**禁用 sudo**：即写入全局别名文件 `/etc/profile.d/rtdo-alias.sh`，把所有 `sudo` 命令改为由 rtdo 提权（新终端生效）：
+
+```sh
+# /etc/profile.d/rtdo-alias.sh（由 rtdo 生成）
+if command -v rtdo >/dev/null 2>&1; then
+    alias sudo='rtdo'
+fi
+```
+
+- 启用后，你在终端里敲 `sudo <命令>` 实际走的是 rtdo 的策略判定与确认流程（而不是 sudo 的全放行）；
+- 需要**恢复 sudo**：删除 `/etc/profile.d/rtdo-alias.sh` 并重新登录（或在新终端执行 `unalias sudo`）；
+- 也可以在引导时选择「不」，之后随时手动创建该文件启用；
+- 该别名只对交互式 shell 生效，不影响脚本、cron 等非交互环境。
+
+## 多语言
+
+rtdo 的所有用户可见输出（帮助、提示、交互、错误）都支持**中英双语**，按以下规则自动选择（优先级从高到低）：
+
+| 变量 | 取值 | 语言 |
+|---|---|---|
+| `RTDO_LANG` | `zh*` | 中文 |
+| `RTDO_LANG` | 其他 | English |
+| `LC_ALL` / `LC_MESSAGES` / `LANG` | 以 `zh` 开头 | 中文 |
+| `LC_ALL` / `LC_MESSAGES` / `LANG` | 其他（如 `en_US.UTF-8`、`C`） | English |
+
+示例：
+
+```bash
+LANG=zh_CN.UTF-8 rtdo --help      # 中文
+RTDO_LANG=en rtdo --help          # English
+```
 
 ## 使用
 
@@ -145,7 +219,7 @@ log_format = "json"
 - 操作用户（用户名和 UID）
 - 完整命令
 - 是否使用 `--force`
-- 最终结果（allow / deny / blocked）与原因（trusted_path、user_confirmed、user_denied、blacklist、force、auth_failed 等）
+- 最终结果（allow / deny / blocked）与原因（trusted_path、user_confirmed、user_denied、blacklist、force、auth_failed、root_password_setup、root_password_setup_failed 等）
 - 放行命令的退出码
 
 JSON 格式（默认）：
@@ -180,7 +254,7 @@ text 格式：
 
 ## 已知限制
 
-- root 账户被锁定（/etc/shadow 密码字段以 `!` 开头）时 PAM 校验会失败，rtdo 不可用——这是预期行为；
+- root 账户被锁定或未设置密码（`/etc/shadow` 密码字段以 `!`/`*` 开头或为空）时，首次运行会自动引导设置（等价于 `sudo passwd`）；若处于无交互环境（无终端、无图形桌面）则会被拒绝并提示手动执行 `sudo passwd`；
 - 图形弹窗依赖 zenity / kdialog / yad，最小化安装的系统需要自己装一个；
 - 路径提取是启发式的，复杂参数（通配符、重定向）可能识别不全，识别不了就进确认流程，不会悄悄放行；
 - 只支持 Linux（PAM 是 Linux 的东西）。
@@ -197,7 +271,7 @@ cargo build --release
 
 简单冒烟：`./rtdo --help`、`./rtdo --version`，`sudo ./rtdo --init` 之后 `./rtdo --policy`。
 
-完整流程需要：setuid 安装 + 给 root 设密码（WSL 里 root 默认没有密码，先 `sudo passwd root`）+ 一个终端或图形桌面。黑名单拦截可以直接用 `rtdo dd if=/dev/zero of=/dev/null bs=1 count=1` 试，应当直接报拦截。
+完整流程需要：setuid 安装 + 给 root 设密码（WSL 里 root 默认没有密码，先 `sudo passwd root`；也可以直接运行 `./rtdo <任意命令>`，首次运行引导会自动设置）+ 一个终端或图形桌面。黑名单拦截可以直接用 `rtdo dd if=/dev/zero of=/dev/null bs=1 count=1` 试，应当直接报拦截。
 
 ## 贡献
 
