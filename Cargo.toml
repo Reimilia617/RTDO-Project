@@ -1,0 +1,17 @@
+[package]
+name = "rtdo"
+version = "0.1.0"
+edition = "2021"
+description = "Root Task Do — 交互式、环境自适应的提权工具（替代传统 sudo）"
+license = "MIT"
+
+[[bin]]
+name = "rtdo"
+path = "src/main.rs"
+
+[dependencies]
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+chrono = "0.4"
