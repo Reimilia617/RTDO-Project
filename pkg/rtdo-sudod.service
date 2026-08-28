@@ -1,0 +1,15 @@
+[Unit]
+Description=rtdo sudo interception daemon (rtdo-sudod)
+Documentation=https://github.com/Reimilia617/RTDO-Project
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/lib/rtdo/rtdo-sudod serve
+RuntimeDirectory=rtdo
+RuntimeDirectoryMode=0755
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

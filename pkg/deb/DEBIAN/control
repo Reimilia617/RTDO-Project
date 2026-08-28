@@ -1,0 +1,18 @@
+Package: rtdo
+Version: 0.5.0
+Section: admin
+Priority: optional
+Architecture: amd64
+Depends: libpam0g, systemd
+Maintainer: Reimilia617 <Reimilia617@users.noreply.github.com>
+Homepage: https://github.com/Reimilia617/RTDO-Project
+Description: Root Task Do — interactive, policy-driven privilege elevation tool (sudo alternative)
+ rtdo is a policy-driven, environment-adaptive sudo alternative. It authenticates
+ against the root password (PAM), then decides per command whether to allow, prompt,
+ or block based on trusted paths and a blacklist.
+ .
+ On first run it auto-detects a missing or weak root password (equal to any username
+ or any user's password) and guides you through setting a new one. It can optionally
+ disable sudo via a Go daemon (rtdo-sudod, systemd service) that intercepts `sudo`
+ and tells you to use rtdo; use `sudo-force` for the original sudo. All output is
+ bilingual (Chinese/English), following LANG.

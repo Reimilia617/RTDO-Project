@@ -1,0 +1,13 @@
+#!/bin/sh
+set -e
+# rtdo prerm：卸载时停止服务，并还原 sudo（若用户曾启用拦截）
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl disable --now rtdo-sudod.service >/dev/null 2>&1 || true
+fi
+
+# 若 /usr/bin/sudo 是 rtdo 的 shim（存在 /usr/bin/sudo.real），还原原版 sudo
+if [ -e /usr/bin/sudo.real ]; then
+  rm -f /usr/bin/sudo /usr/bin/sudo-force
+  mv -f /usr/bin/sudo.real /usr/bin/sudo
+fi
+exit 0

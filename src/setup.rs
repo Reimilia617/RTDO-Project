@@ -37,6 +37,8 @@ pub const SHIM_SUDO_FORCE_PATH: &str = "/usr/bin/sudo-force";
 pub const SYSTEMD_UNIT_PATH: &str = "/etc/systemd/system/rtdo-sudod.service";
 /// 标记文件：存在即表示已启用 sudo 拦截。
 pub const SUDO_DISABLED_MARKER: &str = "/etc/rtdo/sudo-disabled";
+/// 标记文件：存在即表示已询问过“是否禁用 sudo”（无论回答是与否，之后不再询问）。
+pub const DISABLE_SUDO_ASKED_MARKER: &str = "/etc/rtdo/.disable-sudo-asked";
 /// 旧版本遗留的全局别名文件（不再使用，安装拦截时清理）。
 pub const LEGACY_ALIAS_PATH: &str = "/etc/profile.d/rtdo-alias.sh";
 
@@ -420,9 +422,13 @@ pub fn sudo_interception_installed() -> bool {
 /// 询问是否禁用 sudo：安装 Go 守护进程并拦截 sudo（原版 sudo 移动为 sudo.real，
 /// 可用 `sudo-force` 调用）。
 ///
-/// 每次运行（非 root 调用）都会检查；已启用则跳过。
+/// **仅在首次运行时询问**：已启用拦截、或已询问过（无论回答 y/n，写入标记）
+/// 都直接跳过。每次运行都会调用本函数，但只有第一次会提问。
 pub fn offer_disable_sudo() -> Result<(), String> {
     if sudo_interception_installed() {
+        return Ok(());
+    }
+    if Path::new(DISABLE_SUDO_ASKED_MARKER).exists() {
         return Ok(());
     }
     if crate::interact::detect_channel() == crate::interact::Channel::None {
@@ -445,6 +451,13 @@ pub fn offer_disable_sudo() -> Result<(), String> {
          moves to sudo.real; use sudo-force if you really need it; managed by the \
          rtdo-sudod systemd service) [y/N] "
     ))?;
+
+    // 无论回答 y/n，都记录“已询问”，之后不再询问（可用 rtdo.sh --uninstall 重置）
+    if let Some(dir) = Path::new(DISABLE_SUDO_ASKED_MARKER).parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(DISABLE_SUDO_ASKED_MARKER, "asked\n");
+
     if !answer {
         println!(
             "{}",
@@ -535,6 +548,7 @@ pub fn install_sudo_interception() -> Result<(), String> {
             e
         )
     })?;
+    let _ = std::fs::write(DISABLE_SUDO_ASKED_MARKER, "asked\n");
     let _ = std::fs::remove_file(LEGACY_ALIAS_PATH);
 
     println!(

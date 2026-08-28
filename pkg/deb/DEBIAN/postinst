@@ -1,0 +1,21 @@
+#!/bin/sh
+set -e
+# rtdo postinst：setuid、注册并启动守护进程服务
+chown root:root /usr/bin/rtdo 2>/dev/null || true
+chmod 4755 /usr/bin/rtdo 2>/dev/null || true
+chown root:root /usr/local/lib/rtdo/rtdo-sudod 2>/dev/null || true
+chmod 0755 /usr/local/lib/rtdo/rtdo-sudod 2>/dev/null || true
+chmod 0644 /etc/pam.d/rtdo 2>/dev/null || true
+chmod 0644 /etc/rtdo/rtdo.conf 2>/dev/null || true
+chmod 0644 /etc/systemd/system/rtdo-sudod.service 2>/dev/null || true
+
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  systemctl enable --now rtdo-sudod.service >/dev/null 2>&1 || true
+fi
+
+echo
+echo "rtdo 0.5.0 installed."
+echo "  rtdo <command>     # elevate with policy checks"
+echo "  First run guides you through setting the root password"
+echo "  and asks once whether to disable sudo (daemon interception)."

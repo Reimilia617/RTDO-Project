@@ -475,7 +475,7 @@ fn run_command(argv: &[String], force: bool, config_path: Option<&str>) -> ExitC
             }
         }
 
-        // 4c. 每次运行检查：尚未禁用 sudo 时询问是否启用守护进程拦截（已启用则跳过）
+        // 4c. 首次运行询问是否禁用 sudo（已启用拦截或已询问过则静默跳过）
         if let Err(e) = setup::offer_disable_sudo() {
             eprintln!(
                 "{}",
