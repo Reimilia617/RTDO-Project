@@ -1,0 +1,60 @@
+[Reimilia_Binary]
+
+# 预编译二进制安装（可选加速）：从 GitHub Release 下载 rtdo 与 rtdo-sudod，
+# 再交给同一份 rtdo.sh 完成系统安装 —— 只有一套安装逻辑，不会与源码方式走偏。
+#
+# 前置条件：仓库的 Release 里已经上传了对应架构的产物
+#   rtdo-<arch>-linux、rtdo-sudod-<arch>-linux
+# 由 .github/workflows/release.yml 在打 tag 时自动构建。
+# 如果没有产物会下载失败，此时请改用源码方式：--kind build
+
+BINARY_BASE="https://github.com/Reimilia617/RTDO-Project/releases/latest/download"
+REQUIRES_ROOT="true"
+
+bash:
+cd "$REIMILIA_WORKDIR"
+
+arch="$(uname -m)"
+case "$arch" in
+  amd64) arch="x86_64" ;;
+  arm64) arch="aarch64" ;;
+esac
+
+rtdo_asset="rtdo-${arch}-linux"
+daemon_asset="rtdo-sudod-${arch}-linux"
+
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+
+echo "==> 下载预编译二进制 / downloading prebuilt binaries (${arch})"
+for asset in "$rtdo_asset" "$daemon_asset"; do
+  echo "    $BINARY_BASE/$asset"
+  curl -fsSL --retry 3 --retry-delay 2 "$BINARY_BASE/$asset" -o "$tmp/$asset" || {
+    echo "下载失败: $asset / download failed"
+    echo "  该架构可能还没有发布产物，请改用源码编译 / no artifact for this arch, use --kind build instead:"
+    echo "    reimilia --cli $REIMILIA_PROJECT --kind build"
+    exit 1
+  }
+done
+
+echo "==> 校验下载产物 / verifying downloads"
+for f in "$tmp/$rtdo_asset" "$tmp/$daemon_asset"; do
+  magic="$(head -c 4 "$f" | od -An -tx1 | tr -d ' \n')"
+  if [ "$magic" != "7f454c46" ]; then
+    echo "$f 不是 ELF 可执行文件（下载内容可能被替换成了错误页）/ not an ELF binary"
+    exit 1
+  fi
+done
+mv "$tmp/$rtdo_asset" "$tmp/rtdo"
+mv "$tmp/$daemon_asset" "$tmp/rtdo-sudod"
+chmod 0755 "$tmp/rtdo" "$tmp/rtdo-sudod"
+
+echo "==> 交给 rtdo.sh 完成安装 / installing via rtdo.sh --prebuilt-dir"
+# 只提权一次：装完之后 /usr/bin/sudo 会变成 rtdo 的 shim。
+reimilia_elevate ./rtdo.sh --install --prebuilt-dir "$tmp"
+
+echo "==> 校验安装结果 / verifying installation"
+[ -x /usr/local/bin/rtdo ] || { echo "未找到 /usr/local/bin/rtdo，安装可能失败"; exit 1; }
+/usr/local/bin/rtdo --version
+echo
+echo "rtdo 安装完成（预编译）/ installed from prebuilt binaries."

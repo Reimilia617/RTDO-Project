@@ -67,7 +67,26 @@ rtdo 是一个「带策略的 sudo」。你用它在终端里执行命令时，�
 - libpam 开发头文件（`libpam0g-dev` / `pam-devel` / `pam`，脚本会自动安装）；
 - **sudo 已安装并正确配置**（当前用户在 sudo/wheel 组）。未安装时 `rtdo.sh` 会提示先安装配置。
 
-### 方式一：curl 一键安装（推荐）
+### 方式一：Reimilia 部署（推荐）
+
+[Reimilia](https://github.com/Reimilia617/Reimilia) 是本项目的统一部署器。
+项目根目录的 [`Reimilia_Setup/`](Reimilia_Setup/) 已经写好了 Build / Binary 两种安装说明。
+
+```bash
+# 启动 WebUI，在页面上点「部署」
+reimilia
+
+# 或者终端交互
+reimilia --cli RTDO-Project --yes
+
+# 只想要快：用预编译产物（需要 Release 里已经有对应架构的产物）
+reimilia --cli RTDO-Project --kind binary --yes
+```
+
+默认走 **Build（源码编译）**：不依赖是否发布过产物，任何机器上都能装。
+细节见 [Reimilia_Setup/README.md](Reimilia_Setup/README.md)。
+
+### 方式二：curl 一键安装
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Reimilia617/RTDO-Project/main/rtdo.sh | sudo sh -s -- --install
@@ -75,13 +94,31 @@ curl -fsSL https://raw.githubusercontent.com/Reimilia617/RTDO-Project/main/rtdo.
 
 脚本会从 GitHub 仓库拉取源码 → 编译 rtdo（Rust）与 rtdo-sudod（Go）→ 安装到系统 → 注册并启动 systemd 服务 → 拦截 sudo。
 
-### 方式二：git clone 安装
+### 方式三：git clone 安装
 
 ```bash
 git clone https://github.com/Reimilia617/RTDO-Project.git
 cd RTDO-Project
 sudo ./rtdo.sh --install
 ```
+
+### 方式四：预编译二进制安装
+
+如果 Release 里已经有产物（见 [`.github/workflows/release.yml`](.github/workflows/release.yml)，
+打 `v*` tag 时自动构建 `rtdo-<arch>-linux` 与 `rtdo-sudod-<arch>-linux`），
+可以跳过编译，直接用现成二进制：
+
+```bash
+mkdir -p /tmp/rtdo-prebuilt && cd /tmp/rtdo-prebuilt
+base=https://github.com/Reimilia617/RTDO-Project/releases/latest/download
+curl -fsSLO "$base/rtdo-x86_64-linux"
+curl -fsSLO "$base/rtdo-sudod-x86_64-linux"
+cd /path/to/RTDO-Project
+sudo ./rtdo.sh --install --prebuilt-dir /tmp/rtdo-prebuilt
+```
+
+`--prebuilt-dir` 只跳过编译，安装步骤（setuid、配置、PAM、systemd 服务、sudo 拦截）
+仍然由 `rtdo.sh` 独家完成，不会出现两套互相打架的安装逻辑。
 
 ### 安装内容
 
@@ -105,6 +142,7 @@ sudo ./rtdo.sh --uninstall
 会：停止并删除 systemd 服务 → 删除 `/usr/bin/sudo` shim 与 `sudo-force`，把 `/usr/bin/sudo.real` 还原为 `/usr/bin/sudo` → 删除配置、二进制与 PAM 文件。**sudo 完整还原为可用模式。**
 
 > 注意：卸载时若 sudo 已被拦截，脚本内部操作不依赖 sudo（以 root 直接执行）。
+> 如果手上只剩被 shim 接管的 `sudo`，可以用 `sudo-force ./rtdo.sh --uninstall`。
 
 ## 首次使用
 
@@ -284,7 +322,10 @@ cd daemon && CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags "-s -w" -
 - `src/i18n.rs` — 中英双语支持
 - `src/setup.rs` — 每次运行引导（root 密码检测与设置、弱密码检测、sudo 检查、守护进程拦截安装）
 - `daemon/main.go` — rtdo-sudod：Go 守护进程 + sudo/sudo-force shim
-- `rtdo.sh` — 一键安装 / 卸载
+- `rtdo.sh` — 一键安装 / 卸载（支持 `--prebuilt-dir` 跳过编译）
+- `Reimilia_Setup/` — 接入 Reimilia 的安装说明（`Build` / `Binary`），见其 [README](Reimilia_Setup/README.md)
+- `.github/workflows/release.yml` — 打 `v*` tag 时自动构建 Reimilia Binary 所需的 Release 产物
+- `pkg/` — deb / rpm 打包文件
 
 ## 许可证与贡献者
 

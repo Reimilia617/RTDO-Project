@@ -1,0 +1,79 @@
+name: release
+
+# 打 tag（v*）时自动编译并上传 Reimilia Binary 安装方式所需的产物：
+#   rtdo-<arch>-linux、rtdo-sudod-<arch>-linux
+# 也可以到 Actions 页面手动触发（workflow_dispatch）。
+#
+# 产物命名必须与 Reimilia_Setup/Binary 里拼出的名字一致，否则 Binary 安装会下载失败。
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          # 需要 aarch64 产物时打开下面两行（公共仓库的 ARM runner）；
+          # 若你的仓库用不了 ARM runner，可改成 qemu + cross 编译。
+          # - arch: aarch64
+          #   runner: ubuntu-24.04-arm
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 libpam 开发头文件 / install libpam dev headers
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libpam0g-dev
+
+      - name: 安装 Rust 工具链 / set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 安装 Go 工具链 / set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.21"
+
+      - name: 编译 rtdo（Rust）/ build rtdo
+        run: cargo build --release
+
+      - name: 编译 rtdo-sudod（Go）/ build rtdo-sudod
+        run: |
+          cd daemon
+          CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags "-s -w" -o rtdo-sudod .
+
+      - name: 整理产物 / stage artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          install -m 0755 target/release/rtdo "dist/rtdo-${{ matrix.arch }}-linux"
+          install -m 0755 daemon/rtdo-sudod "dist/rtdo-sudod-${{ matrix.arch }}-linux"
+          ls -l dist
+          # 冒烟测试：确认二进制真的能跑（架构不对/链接错误会在这里暴露）
+          ./dist/rtdo-${{ matrix.arch }}-linux --version
+
+      - name: 上传到 Release / upload to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+
+      - name: 手动触发的产物 / artifacts for manual runs
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: rtdo-${{ matrix.arch }}-linux
+          path: dist/*

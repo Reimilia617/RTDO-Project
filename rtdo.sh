@@ -4,6 +4,7 @@
 # 用法：
 #   curl 安装：  curl -fsSL https://raw.githubusercontent.com/Reimilia617/RTDO-Project/main/rtdo.sh | sudo sh -s -- --install
 #   git clone：  git clone https://github.com/Reimilia617/RTDO-Project.git && cd RTDO-Project && sudo ./rtdo.sh --install
+#   预编译安装： sudo ./rtdo.sh --install --prebuilt-dir /path/to/dir   （目录内需有 rtdo 与 rtdo-sudod）
 #   卸载：       sudo ./rtdo.sh --uninstall        （或先下载脚本再执行）
 #   状态：       sudo ./rtdo.sh --status
 #
@@ -12,6 +13,8 @@
 #     （/usr/local/bin/rtdo setuid root、/usr/local/lib/rtdo/rtdo-sudod、
 #      /etc/rtdo、/etc/pam.d/rtdo）-> 拦截 sudo（原版移动到 /usr/bin/sudo.real，
 #      可用 sudo-force 调用原版）-> 注册并启动 systemd 服务 rtdo-sudod。
+#   * --prebuilt-dir <目录>：跳过编译，直接用该目录里现成的 rtdo / rtdo-sudod。
+#     供 Reimilia 的 Binary 安装方式与 CI 发布产物使用，安装逻辑仍由本脚本独家实现。
 #   * --uninstall：停止并删除服务、删除配置与二进制、还原 sudo 为可用模式。
 set -euo pipefail
 
@@ -32,6 +35,9 @@ SUDO_REAL="/usr/bin/sudo.real"
 SUDO_FORCE="/usr/bin/sudo-force"
 MARKER="$CONF_DIR/sudo-disabled"
 
+# 由 --prebuilt-dir 设置：非空则跳过编译，直接使用该目录中的二进制
+PREBUILT_DIR="${RTDO_PREBUILT_DIR:-}"
+
 say()  { printf '%s\n' "$*"; }
 die()  { say "错误 / error: $*" >&2; exit 1; }
 
@@ -45,13 +51,16 @@ rtdo v$VERSION — Root Task Do: interactive privilege elevation tool (sudo alte
     curl -fsSL $RAW_URL | sudo sh -s -- --install
   git clone 安装 / git-clone install:
     git clone https://github.com/$REPO.git && cd RTDO-Project && sudo ./rtdo.sh --install
+  预编译安装 / prebuilt install:
+    sudo ./rtdo.sh --install --prebuilt-dir /path/to/dir
   卸载 / uninstall:
     sudo ./rtdo.sh --uninstall
   状态 / status:
     sudo ./rtdo.sh --status
 
 参数 / options:
-  --install      安装（编译并放置二进制、注册 systemd 服务、拦截 sudo）/ install (build, install, register service, intercept sudo)
+  --install      安装（编译或使用预编译二进制、注册 systemd 服务、拦截 sudo）/ install (build, install, register service, intercept sudo)
+  --prebuilt-dir <目录>  使用该目录下的 rtdo / rtdo-sudod，跳过编译 / use prebuilt binaries from <dir>, skip building
   --uninstall    卸载（删除配置与二进制、还原 sudo）/ uninstall (remove files, restore sudo)
   --status       查看安装状态 / show install status
   --help, -h     帮助 / help
@@ -81,11 +90,14 @@ detect_source() {
   echo "$tmp/RTDO-Project-main"
 }
 
-check_prereqs() {
-  command -v cargo >/dev/null 2>&1 || die "未找到 cargo（Rust 工具链）。请先安装: https://rustup.rs / cargo not found; install Rust first."
-  command -v go >/dev/null 2>&1 || die "未找到 go（Go 工具链，用于编译守护进程）。请先安装: https://go.dev/dl / go not found; install Go first."
+check_os_prereqs() {
   command -v systemctl >/dev/null 2>&1 || die "未找到 systemd（systemctl）/ systemd not found."
   command -v sudo >/dev/null 2>&1 || die "未安装 sudo，请先安装并配置 sudo（apt install sudo; usermod -aG sudo <用户>）/ sudo not found; install and configure sudo first."
+}
+
+check_build_prereqs() {
+  command -v cargo >/dev/null 2>&1 || die "未找到 cargo（Rust 工具链）。请先安装: https://rustup.rs / cargo not found; install Rust first."
+  command -v go >/dev/null 2>&1 || die "未找到 go（Go 工具链，用于编译守护进程）。请先安装: https://go.dev/dl / go not found; install Go first."
   if [ ! -f /usr/include/security/pam_appl.h ]; then
     say "==> 缺少 libpam 开发头文件，尝试安装… / installing libpam dev headers…"
     if command -v apt-get >/dev/null 2>&1; then apt-get update -qq && apt-get install -y libpam0g-dev
@@ -94,6 +106,9 @@ check_prereqs() {
     else die "请手动安装 libpam 开发头文件 / install libpam dev headers manually."; fi
   fi
 }
+
+# 源码安装所需的全部前置条件（保留旧函数名，兼容既有调用）
+check_prereqs() { check_os_prereqs; check_build_prereqs; }
 
 build() {
   local src="$1"
@@ -127,13 +142,28 @@ EOF
 
 cmd_install() {
   check_root
-  local src; src="$(detect_source)"
-  check_prereqs
-  build "$src"
+  check_os_prereqs
+
+  local rtdo_src daemon_src
+  if [ -n "$PREBUILT_DIR" ]; then
+    [ -d "$PREBUILT_DIR" ] || die "预编译目录不存在 / prebuilt dir not found: $PREBUILT_DIR"
+    rtdo_src="$PREBUILT_DIR/rtdo"
+    daemon_src="$PREBUILT_DIR/rtdo-sudod"
+    [ -f "$rtdo_src" ]   || die "预编译目录缺少 rtdo / missing rtdo in $PREBUILT_DIR"
+    [ -f "$daemon_src" ] || die "预编译目录缺少 rtdo-sudod / missing rtdo-sudod in $PREBUILT_DIR"
+    say "==> 使用预编译二进制，跳过编译 / using prebuilt binaries, skipping build: $PREBUILT_DIR"
+    chmod 0755 "$rtdo_src" "$daemon_src" 2>/dev/null || true
+  else
+    local src; src="$(detect_source)"
+    check_build_prereqs
+    build "$src"
+    rtdo_src="$src/target/release/rtdo"
+    daemon_src="$src/daemon/rtdo-sudod"
+  fi
 
   say "==> 安装文件 / installing files…"
-  install -D -m 4755 -o root -g root "$src/target/release/rtdo" "$RTDO_BIN"
-  install -D -m 0755 -o root -g root "$src/daemon/rtdo-sudod" "$DAEMON_BIN"
+  install -D -m 4755 -o root -g root "$rtdo_src" "$RTDO_BIN"
+  install -D -m 0755 -o root -g root "$daemon_src" "$DAEMON_BIN"
 
   # 生成默认配置与 PAM 服务文件（rtdo --init 需要 root，已满足）
   "$RTDO_BIN" --init || true
@@ -220,12 +250,26 @@ cmd_status() {
 }
 
 main() {
-  case "${1:-}" in
-    --install|-i)   cmd_install ;;
-    --uninstall|-u) cmd_uninstall ;;
-    --status|-s)    cmd_status ;;
-    --help|-h|"")   usage ;;
-    *) say "未知参数 / unknown option: $1" >&2; usage; exit 2 ;;
+  local action=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --install|-i)     action=install ;;
+      --uninstall|-u)   action=uninstall ;;
+      --status|-s)      action=status ;;
+      --prebuilt-dir)   shift; [ "$#" -gt 0 ] || die "--prebuilt-dir 需要一个目录参数 / --prebuilt-dir needs a directory"; PREBUILT_DIR="$1" ;;
+      --prebuilt-dir=*) PREBUILT_DIR="${1#*=}" ;;
+      --help|-h)        action=help ;;
+      "")               ;;
+      *) say "未知参数 / unknown option: $1" >&2; usage; exit 2 ;;
+    esac
+    shift
+  done
+
+  case "$action" in
+    install)   cmd_install ;;
+    uninstall) cmd_uninstall ;;
+    status)    cmd_status ;;
+    *)         usage ;;
   esac
 }
 

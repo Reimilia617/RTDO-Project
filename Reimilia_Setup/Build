@@ -1,0 +1,43 @@
+[Reimilia_Build]
+
+# 源码编译安装：把仓库克隆下来后，就地调用 rtdo.sh 编译 Rust + Go 并安装。
+# 这是默认方式 —— 不依赖 GitHub Release 是否已经上传了产物，任何时候都能装。
+
+BUILD_LANG="rust"
+BUILD_HTTP="https://github.com/Reimilia617/RTDO-Project.git"
+REPO_NAME="RTDO-Project"
+# 安装要写 /usr/local/bin（setuid root）、/etc/systemd/system 等，必须提权
+REQUIRES_ROOT="true"
+
+bash:
+# Reimilia 已经把本仓库克隆到 $REIMILIA_WORKDIR，直接就地编译，无需再次 clone
+cd "$REIMILIA_WORKDIR"
+
+echo "==> 校验源码目录 / checking source tree"
+[ -f Cargo.toml ] || { echo "缺少 Cargo.toml，源码不完整 / Cargo.toml missing"; exit 1; }
+[ -d daemon ]     || { echo "缺少 daemon/，源码不完整 / daemon/ missing"; exit 1; }
+
+echo "==> 检查编译工具链 / checking toolchain"
+missing=""
+for tool in cargo go; do
+  command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
+done
+if [ -n "$missing" ]; then
+  echo "缺少编译工具:$missing / missing build tools:$missing"
+  echo "  Rust: https://rustup.rs     Go: https://go.dev/dl"
+  echo "  或者改用预编译方式 / or use prebuilt binaries:"
+  echo "    reimilia --cli $REIMILIA_PROJECT --kind binary"
+  exit 1
+fi
+
+echo "==> 编译并安装（提权执行 rtdo.sh --install）/ building & installing via elevated rtdo.sh"
+echo "    这一步会编译 Rust 与 Go，可能需要几分钟 / compiling Rust and Go, this can take a while"
+# 只提权一次：rtdo.sh 安装完成后 /usr/bin/sudo 会被替换成 rtdo 的 shim，
+# 之后再用 sudo 提权会被自己拦截，所以安装动作必须一次做完。
+reimilia_elevate ./rtdo.sh --install
+
+echo "==> 校验安装结果 / verifying installation"
+[ -x /usr/local/bin/rtdo ] || { echo "未找到 /usr/local/bin/rtdo，安装可能失败"; exit 1; }
+/usr/local/bin/rtdo --version
+echo
+echo "rtdo 安装完成 / installed. 用法 / usage: rtdo <命令>；原版 sudo 可用 sudo-force 调用。"
